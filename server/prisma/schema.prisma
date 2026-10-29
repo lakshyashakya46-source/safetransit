@@ -1,0 +1,289 @@
+// SafeTransit Enterprise Database Schema (Prisma)
+// Advanced Driver Duty Lifecycle, Rest Timer, Overtime Approval & Compliance Engine
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  AUTHORITY_ADMIN
+  DEPOT_OFFICER
+  DRIVER
+  CONDUCTOR
+  ACCOUNTS
+}
+
+enum DutyStatus {
+  SCHEDULED
+  ACTIVE
+  PAUSED_BREAK
+  COMPLETED
+  CANCELLED
+}
+
+enum RestEligibilityStatus {
+  RESTING_INELIGIBLE
+  OVERTIME_ELIGIBLE_ONLY_WITH_APPROVAL
+  FULLY_ELIGIBLE
+  UNKNOWN
+  REQUIRES_REVIEW
+}
+
+enum OvertimeRequestStatus {
+  DRAFT
+  SUBMITTED
+  BLOCKED_BY_REST_RULE
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+  EXPIRED
+  COMPLETED
+}
+
+enum ExceptionOutcome {
+  ACCEPTED_FOR_REVIEW
+  REJECTED
+  ESCALATED
+  LEGALLY_PROHIBITED
+  APPROVED_UNDER_VERIFIED_EXCEPTION
+}
+
+enum DiscrepancyStatus {
+  MATCH
+  UNDER_HOURS
+  OVER_HOURS_UNAPPROVED
+  DISPUTED
+}
+
+model User {
+  id           String        @id @default(uuid())
+  name         String
+  email        String        @unique
+  password     String
+  role         Role
+  depot        String
+  phone        String?
+  active       Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  dutySessions     DutySession[]     @relation("DriverSessions")
+  restPeriods      RestPeriod[]      @relation("DriverRestPeriods")
+  overtimeRequests OvertimeRequest[] @relation("DriverOvertimeRequests")
+  officerApprovals OvertimeApproval[]@relation("ReviewingOfficer")
+  auditLogs        AuditLog[]        @relation("ActorAuditLogs")
+
+  @@index([email])
+  @@index([role])
+  @@index([depot])
+}
+
+model Policy {
+  id                         String   @id @default("POL-001")
+  version                    String   @default("POL-v2.4")
+  normalRestHours            Float    @default(13.0)  // Proposed standard continuous rest policy
+  minRestThresholdForOvertime Float   @default(9.0)   // Minimum rest threshold for overtime evaluation under Motor Transport rules
+  maxDutyHours               Float    @default(10.0)  // Statutory daily maximum duty hours
+  maxDrivingHours            Float    @default(8.0)   // Statutory maximum continuous steering time
+  weeklyLimit                Float    @default(48.0)  // Statutory weekly ceiling
+  overtimeThreshold          Float    @default(8.0)   // Shift length after which overtime accrues
+  maxConsecutiveDays         Int      @default(6)     // Maximum consecutive shifts before mandatory 24h rest
+  nightShiftMultiplier       Float    @default(1.25)  // Circadian fatigue multiplier for 22:00-06:00
+  hourlyOvertimeRateINR      Float    @default(350.0) // Rate per hour for overtime calculations
+  mandatoryBreakIntervalHours Float   @default(4.5)   // Max hours before break is mandatory
+  mandatoryBreakMinutes      Int      @default(30)    // Mandatory break length in minutes
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+}
+
+model DutySession {
+  id                  String       @id @default(uuid())
+  dutyId              String       @unique // e.g. DUTY-SES-2026-XXXX
+  driverId            String
+  driverName          String
+  employeeId          String?
+  busId               String?
+  routeId             String?
+  routeName           String?
+  tripId              String?
+  depot               String?
+  policyVersion       String       @default("POL-v2.4")
+  status              DutyStatus   @default(ACTIVE)
+
+  // Server-generated UTC timestamps
+  startTime           DateTime
+  endTime             DateTime?
+
+  // Durations in decimal hours
+  scheduledHours      Float        @default(8.0)
+  elapsedDutyHours    Float        @default(0.0)
+  actualDrivingHours  Float        @default(0.0)
+  totalBreakMinutes   Int          @default(0)
+
+  // Breaks ledger stored as JSON array: [{ breakId, startTime, endTime, durationMinutes, reason }]
+  breaks              Json         @default("[]")
+
+  // Fatigue & Safety signals at duty start/close
+  fatigueScoreStart   Int          @default(15)
+  fatigueScoreEnd     Int?
+  riskLevel           String       @default("Low")
+
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  driver              User         @relation("DriverSessions", fields: [driverId], references: [id])
+  restPeriod          RestPeriod?  @relation("SessionRestPeriod")
+  overtimeRequests    OvertimeRequest[]
+
+  @@index([driverId, status])
+  @@index([startTime])
+  @@index([busId])
+}
+
+model RestPeriod {
+  id                    String                @id @default(uuid())
+  driverId              String
+  driverName            String
+  dutySessionId         String?               @unique
+  restStartTime         DateTime
+  restEndTime           DateTime?
+  requiredRestHours     Float                 @default(13.0)
+  minOvertimeThreshold  Float                 @default(9.0)
+  continuousRestHours   Float                 @default(0.0)
+  eligibilityStatus     RestEligibilityStatus @default(RESTING_INELIGIBLE)
+  policyVersion         String                @default("POL-v2.4")
+  isComplete            Boolean               @default(false)
+  notes                 String?
+
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  driver                User                  @relation("DriverRestPeriods", fields: [driverId], references: [id])
+  dutySession           DutySession?          @relation("SessionRestPeriod", fields: [dutySessionId], references: [id])
+
+  @@index([driverId, isComplete])
+  @@index([restStartTime])
+}
+
+model OvertimeRequest {
+  id                    String                @id @default(uuid())
+  requestId             String                @unique // e.g. OTR-2026-XXXX
+  driverId              String
+  driverName            String
+  employeeId            String?
+  dutySessionId         String?
+  tripId                String?
+  busId                 String?
+  routeName             String?
+  depot                 String?
+
+  requestedHours        Float
+  proposedStartTime     DateTime?
+  proposedEndTime       DateTime?
+  reason                String
+  isEmergency           Boolean               @default(false)
+  emergencyReference    String?
+  emergencyJustification String?
+
+  status                OvertimeRequestStatus @default(SUBMITTED)
+  blockReason           String?
+  eligibilitySnapshot   Json?                 // Detailed compliance rules evaluated by backend
+
+  reviewingOfficerId    String?
+  reviewingOfficerName  String?
+  decisionTimestamp     DateTime?
+  decisionReason        String?
+  approvedHours         Float?                @default(0.0)
+  hourlyRateINR         Float                 @default(350.0)
+  approvedAmountINR     Float                 @default(0.0)
+
+  // Actual hours worked post-completion
+  actualHoursWorked     Float?                @default(0.0)
+  actualStartTime       DateTime?
+  actualEndTime         DateTime?
+  discrepancyStatus     DiscrepancyStatus     @default(MATCH)
+  verificationSource    String?               // e.g. "GPS_TELEMETRY", "OFFICER_LOG", "WAYBILL"
+
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  driver                User                  @relation("DriverOvertimeRequests", fields: [driverId], references: [id])
+  dutySession           DutySession?          @relation(fields: [dutySessionId], references: [id])
+  approvals             OvertimeApproval[]
+
+  @@index([driverId, status])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OvertimeApproval {
+  id                    String                @id @default(uuid())
+  requestId             String
+  officerId             String
+  officerName           String
+  officerRole           Role
+  decision              String                // "APPROVED" | "REJECTED" | "ESCALATED"
+  decisionReason        String
+  exceptionBasis        String?
+  exceptionOutcome      ExceptionOutcome?
+  approvedHours         Float
+  driverRestHoursAtApproval Float
+  policyVersion         String                @default("POL-v2.4")
+  complianceCheckResult Json
+  timestamp             DateTime              @default(now())
+
+  request               OvertimeRequest       @relation(fields: [requestId], references: [id])
+  officer               User                  @relation("ReviewingOfficer", fields: [officerId], references: [id])
+
+  @@index([requestId])
+  @@index([officerId])
+}
+
+model DriverWorkRecord {
+  id                  String   @id @default(uuid())
+  driverId            String
+  driverName          String
+  date                String   // YYYY-MM-DD
+  dutySessionIds      String[]
+  totalDutyHours      Float    @default(0.0)
+  totalDrivingHours   Float    @default(0.0)
+  totalRestHours      Float    @default(0.0)
+  approvedOvertime    Float    @default(0.0)
+  actualOvertime      Float    @default(0.0)
+  payableOvertimeINR  Float    @default(0.0)
+  complianceViolations String[]
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([driverId, date])
+  @@index([driverId, date])
+}
+
+model AuditLog {
+  id               String   @id @default(uuid())
+  user             String
+  role             String
+  action           String
+  entity           String
+  entityId         String
+  reason           String?
+  previous         Json?
+  newValue         Json?
+  hash             String?  // SHA-256 tamper-evident hash
+  prevHash         String?  // Previous record's hash in blockchain-style chain
+  timestamp        DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  actorId          String?
+  actor            User?    @relation("ActorAuditLogs", fields: [actorId], references: [id])
+
+  @@index([entity, entityId])
+  @@index([timestamp])
+  @@index([action])
+}

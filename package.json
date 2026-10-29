@@ -1,0 +1,25 @@
+{
+  "name": "safetransit-ultra",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "server": "npm run dev --prefix server",
+    "client": "npm run dev --prefix client",
+    "docker:db": "docker compose up -d postgres",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "sync:db": "node -e \"import('./server/src/db/connection.js').then(async c => { await c.initDatabase(); console.log('Database Synced Successfully'); process.exit(0); });\"",
+    "seed:db": "node -e \"import('./server/src/db/seedData.js').then(async s => { await s.resetAndSeedDatabase(); console.log('Database Seeded Successfully'); process.exit(0); });\"",
+    "test": "npm test --prefix server",
+    "generate:ppt": "node generate_presentation.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "pdfkit": "^0.20.2",
+    "pptxgenjs": "^4.0.1"
+  }
+}
