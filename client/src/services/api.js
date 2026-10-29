@@ -1,4 +1,4 @@
-const API_BASE = "/api";
+const API_BASE = "https://safetransit-amx7.onrender.com//api";
 
 async function request(path, options = {}) {
   const token = localStorage.getItem("safeTransitToken");
